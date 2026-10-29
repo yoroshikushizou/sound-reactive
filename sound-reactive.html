@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sound Reactive Visualizer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { color-scheme: dark; }
+    body {
+      min-height: 100vh;
+      background: #0b0b10;
+      color: #f5f2ff;
+      font-family: Arial, Helvetica, sans-serif;
+      overflow: hidden;
+    }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    .ui {
+      position: relative; z-index: 1; min-height: 100vh;
+      display: flex; flex-direction: column; justify-content: space-between;
+      padding: clamp(20px, 4vw, 52px);
+      pointer-events: none;
+    }
+    header, footer, .controls { pointer-events: auto; }
+    .eyebrow {
+      font-size: 11px; letter-spacing: .24em; text-transform: uppercase;
+      color: #b6a8d9; margin-bottom: 12px;
+    }
+    h1 { font-size: clamp(34px, 6vw, 76px); line-height: .95; letter-spacing: -.06em; }
+    .subtitle { margin-top: 14px; color: #aaa6b9; font-size: 14px; }
+    .controls {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+      margin-top: 24px;
+    }
+    button, label.upload {
+      border: 1px solid #625875; border-radius: 999px; padding: 12px 17px;
+      background: rgba(24, 20, 34, .82); color: #fff; font-size: 12px;
+      letter-spacing: .04em; cursor: pointer; transition: .2s;
+    }
+    button:hover, label.upload:hover { background: #332744; border-color: #c4a5ff; }
+    button.primary { background: #d6b9ff; color: #181020; border-color: #d6b9ff; }
+    button.primary:hover { background: #e5d3ff; }
+    input[type=file] { display: none; }
+    .status {
+      margin-top: 13px; font-size: 12px; color: #aaa6b9; min-height: 16px;
+    }
+    footer { display: flex; justify-content: space-between; gap: 18px; align-items: end; }
+    .hint { max-width: 360px; color: #8e899d; font-size: 11px; line-height: 1.6; }
+    .meter-label { font-size: 10px; letter-spacing: .18em; color: #b6a8d9; text-align: right; }
+    .meter { display: flex; gap: 4px; margin-top: 8px; align-items: end; height: 30px; }
+    .meter span { width: 4px; height: 4px; border-radius: 5px; background: #c6a3ff; opacity: .65; }
+    @media (max-width: 600px) {
+      .ui { padding: 24px 20px; }
+      footer { align-items: start; flex-direction: column; }
+      .meter-label { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="visualizer" aria-label="Animated sound-reactive visualizer"></canvas>
+  <main class="ui">
+    <header>
+      <p class="eyebrow">Interactive experiment / 001</p>
+      <h1>FEEL THE<br>SOUND.</h1>
+      <p class="subtitle">A visual experience driven by audio frequencies.</p>
+      <div class="controls">
+        <button class="primary" id="micButton">Use microphone</button>
+        <label class="upload" for="audioFile">Play an audio file</label>
+        <input id="audioFile" type="file" accept="audio/*">
+        <button id="stopButton">Stop audio</button>
+      </div>
+      <p class="status" id="status">Choose the microphone or an audio file to begin.</p>
+    </header>
+    <footer>
+      <p class="hint">Tip: Use headphones or play music nearby. Microphone access requires permission and usually works on HTTPS or localhost.</p>
+      <div>
+        <p class="meter-label">LIVE FREQUENCY</p>
+        <div class="meter" id="meter"></div>
+      </div>
+    </footer>
+  </main>
+  <audio id="audio" crossorigin="anonymous"></audio>
+  <script>
+    const canvas = document.getElementById('visualizer');
+    const ctx = canvas.getContext('2d');
+    const micButton = document.getElementById('micButton');
+    const stopButton = document.getElementById('stopButton');
+    const fileInput = document.getElementById('audioFile');
+    const audio = document.getElementById('audio');
+    const status = document.getElementById('status');
+    const meter = document.getElementById('meter');
+
+    let audioContext, analyser, source, micStream, frequencyData;
+    let audioElementSource;
+    let running = false;
+    let smoothLevel = 0;
+    let time = 0;
+
+    for (let i = 0; i < 36; i++) {
+      const bar = document.createElement('span');
+      meter.appendChild(bar);
+    }
+    const bars = [...meter.children];
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.floor(innerWidth * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    async function setupAudio() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.82;
+        frequencyData = new Uint8Array(analyser.frequencyBinCount);
+        analyser.connect(audioContext.destination);
+      }
+      await audioContext.resume();
+    }
+
+    async function useMicrophone() {
+      try {
+        stopCurrentSource();
+        await setupAudio();
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        source = audioContext.createMediaStreamSource(micStream);
+        source.connect(analyser);
+        running = true;
+        status.textContent = 'Microphone is active — make some sound!';
+      } catch (error) {
+        status.textContent = 'Could not access microphone. Check browser permission and try again.';
+      }
+    }
+
+    async function useAudioFile(file) {
+      if (!file) return;
+      stopCurrentSource();
+      await setupAudio();
+      audio.src = URL.createObjectURL(file);
+      audio.loop = true;
+      if (!audioElementSource) {
+        audioElementSource = audioContext.createMediaElementSource(audio);
+      }
+      audioElementSource.connect(analyser);
+      try {
+        await audio.play();
+        running = true;
+        status.textContent = 'Now playing: ' + file.name;
+      } catch (error) {
+        status.textContent = 'Unable to play this file. Try another audio file.';
+      }
+    }
+
+    function stopCurrentSource() {
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+        micStream = null;
+      }
+      if (source) {
+        try { source.disconnect(); } catch (e) {}
+        source = null;
+      }
+      audio.pause();
+      running = false;
+      bars.forEach(bar => bar.style.height = '4px');
+    }
+
+    micButton.addEventListener('click', useMicrophone);
+    fileInput.addEventListener('change', event => useAudioFile(event.target.files[0]));
+    stopButton.addEventListener('click', () => {
+      stopCurrentSource();
+      status.textContent = 'Stopped. Choose an audio source to start again.';
+    });
+
+    function draw() {
+      requestAnimationFrame(draw);
+      const w = innerWidth, h = innerHeight;
+      ctx.clearRect(0, 0, w, h);
+
+      let level = 0;
+      if (analyser && running) {
+        analyser.getByteFrequencyData(frequencyData);
+        const sum = frequencyData.reduce((a, b) => a + b, 0);
+        level = sum / frequencyData.length / 255;
+      }
+      smoothLevel += (level - smoothLevel) * 0.16;
+      time += 0.008 + smoothLevel * 0.04;
+
+      bars.forEach((bar, i) => {
+        const value = (running && frequencyData) ? frequencyData[i] / 255 : 0.08 + Math.sin(time * 2 + i * .4) * .05;
+        bar.style.height = (4 + value * 28) + 'px';
+        bar.style.opacity = String(0.35 + value * .65);
+      });
+
+      const cx = w * 0.62;
+      const cy = h * 0.54;
+      const base = Math.min(w, h) * 0.12;
+      const pulse = smoothLevel * Math.min(w, h) * 0.12;
+
+      // Soft atmospheric glow
+      const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, base * 4.2 + pulse);
+      glow.addColorStop(0, `rgba(158, 102, 255, ${0.11 + smoothLevel * 0.2})`);
+      glow.addColorStop(0.55, 'rgba(72, 45, 126, 0.07)');
+      glow.addColorStop(1, 'rgba(10, 10, 16, 0)');
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, w, h);
+
+      // Frequency-driven circular waves
+      for (let ring = 7; ring >= 0; ring--) {
+        const freq = (running && frequencyData) ? frequencyData[(ring * 5 + 4) % frequencyData.length] / 255 : 0.12;
+        const radius = base * (0.45 + ring * 0.24) + pulse * (0.25 + freq);
+        ctx.beginPath();
+        const points = 180;
+        for (let i = 0; i <= points; i++) {
+          const angle = (i / points) * Math.PI * 2;
+          const bin = (Math.floor(i / points * 80) + ring * 7) % (frequencyData ? frequencyData.length : 1);
+          const wave = (running && frequencyData) ? frequencyData[bin] / 255 : Math.sin(angle * 5 + time + ring) * 0.08 + 0.1;
+          const wobble = Math.sin(angle * (3 + ring % 4) + time * (1 + ring * .08)) * (4 + smoothLevel * 15);
+          const r = radius + wave * (8 + ring * 1.5) + wobble;
+          const x = cx + Math.cos(angle + time * .08) * r;
+          const y = cy + Math.sin(angle + time * .08) * r;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = `hsla(${263 + ring * 7 + smoothLevel * 30}, 90%, ${64 + ring * 2}%, ${0.16 + (7-ring)*0.055})`;
+        ctx.lineWidth = ring === 0 ? 1.8 : 0.8;
+        ctx.stroke();
+      }
+
+      // Central core
+      const coreRadius = base * 0.28 + pulse * 0.5;
+      const core = ctx.createRadialGradient(cx - coreRadius*.3, cy - coreRadius*.3, 1, cx, cy, coreRadius * 1.8);
+      core.addColorStop(0, 'rgba(255,255,255,0.95)');
+      core.addColorStop(0.2, 'rgba(214,185,255,0.8)');
+      core.addColorStop(1, 'rgba(129,71,220,0)');
+      ctx.fillStyle = core;
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreRadius * 1.8, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Fine orbiting particles
+      for (let i = 0; i < 90; i++) {
+        const a = i * 2.399 + time * (i % 2 ? 0.18 : -0.13);
+        const dist = base * (1.6 + (i % 17) * 0.14) + pulse * (i % 4) * 0.18;
+        const x = cx + Math.cos(a) * dist;
+        const y = cy + Math.sin(a) * dist;
+        const size = 0.6 + ((i * 7) % 5) * 0.25 + smoothLevel * 2;
+        ctx.fillStyle = `rgba(218, 193, 255, ${0.25 + (i % 5) * .12})`;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    draw();
+  </script>
+</body>
+</html>
